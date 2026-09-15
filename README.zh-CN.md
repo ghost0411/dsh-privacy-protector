@@ -57,7 +57,7 @@ npm test               # node --test（87 项全过）
 dsh plugin --profile web add link:/path/to/dsh-privacy-protector
 
 # 或作为 bundle 发布后安装
-dsh plugin --profile web add "github:your-name/dsh-privacy-protector#main"
+dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
 ```
 
 `cordis.patch.yml` 会向 profile 插入一行：

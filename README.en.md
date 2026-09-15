@@ -55,7 +55,7 @@ npm test               # node --test (87 tests, all passing)
 dsh plugin --profile web add link:/path/to/dsh-privacy-protector
 
 # or install from a published bundle
-dsh plugin --profile web add "github:your-name/dsh-privacy-protector#main"
+dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
 ```
 
 `cordis.patch.yml` injects one line into the profile:

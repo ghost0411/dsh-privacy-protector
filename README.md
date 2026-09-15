@@ -28,7 +28,7 @@ Pre-send PII pseudonymization + sensitive-topic guardian with induced-lock prote
 ## Install / 安装
 
 ```bash
-dsh plugin --profile web add "github:your-name/dsh-privacy-protector#main"
+dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
 ```
 
 Full docs in [English](README.en.md) / 完整文档见 [中文](README.zh-CN.md).
