@@ -70,6 +70,7 @@ dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
       config:
         enabled: true
         logMasked: true
+        redactTelemetry: true
         extraRules: []
 ```
 
@@ -77,11 +78,32 @@ dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
 
 ```ts
 interface Config {
-  enabled: boolean      // 默认 true
-  logMasked: boolean    // 默认 true，记录脱敏日志
+  enabled: boolean          // 默认 true
+  logMasked: boolean        // 默认 true，记录脱敏日志
+  redactTelemetry: boolean  // 默认 true，从会话遥测导出中抹掉 PII（见下）
   extraRules: [{ type: string; pattern: string; flags?: string; groupIndex?: number }]
 }
 ```
+
+## 遥测脱敏
+
+`agent/pre-step` 只挡住**模型**，挡不住**导出**。会话日志里存的是还原后的真实值，
+而 `@deepseek-ai/dsh-session-telemetry` 会把会话日志记录镜像到 OTLP/HTTP，
+**自身不带任何脱敏规则**（部署注释原文：*so exports are the raw captured copy*）：
+
+- 默认 `FEEDBACK_ONLY`：你点 `/feedback` 时，自上次交接以来的会话记录会上传到
+  `harness-telemetry.deepseeksvc.com`。
+- `DSH_TELEMETRY_MODE=FULL` 会持续上传；`DSH_TELEMETRY_OTLP_URL` 可指向任意采集器。
+
+本插件在官方指定的 `session-telemetry/record` waterfall 上挂单向脱敏：命中规则的值变成
+`[REDACTED:类型]`，**不写入 vault、不可逆**（导出副本本就无需可还原）。该监听是同步的、
+纯函数的、不改入参，且遍历有深度与节点上限以保护捕获热路径。
+
+与逐会话的「隐私保护」开关**无关**：遥测记录没有可靠的会话键，且把真实 PII 传给采集器
+在任何开关状态下都不应发生。想整体关掉就设 `redactTelemetry: false`。
+
+> 注意范围：这里修的是**导出副本**。会话日志本体（`~/.dsh/sessions/**/session.jsonl.zstd`）
+> 仍保存真实值——当前 DSH 版本没有可用的"写入日志前"钩子，详见 `HANDOFF.md` 5.2。
 
 ## 敏感话题守护（guardian）
 

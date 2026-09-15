@@ -11,4 +11,5 @@
       config:
         enabled: true
         logMasked: true
+        redactTelemetry: true
         extraRules: []

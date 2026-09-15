@@ -7,6 +7,7 @@ import { createToggleRegistry } from './toggle.js'
 import { createGuardian } from './guardian.js'
 import { createPrivacyCtlHandler, type HttpLikeRequest, type HttpLikeResponse } from './privacyCtl.js'
 import { createToggleFileStore, createVaultFileStore, dataDir, detectSafeStorage } from './store.js'
+import { installTelemetryRedaction } from './telemetry.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -40,12 +41,14 @@ export interface ExtraRuleConfig {
 export interface Config {
   enabled: boolean
   logMasked: boolean
+  redactTelemetry: boolean
   extraRules: ExtraRuleConfig[]
 }
 
 export const Config: Schema<Config> = Schema.object({
   enabled: Schema.boolean().default(true),
   logMasked: Schema.boolean().default(true),
+  redactTelemetry: Schema.boolean().default(true),
   extraRules: Schema.array(
     Schema.object({
       type: Schema.string(),
@@ -112,6 +115,13 @@ export function apply(ctx: Context, config: Config) {
       // logging must never break the conversation
     }
   }, guardian)
+
+  // Redact PII in outbound session-telemetry records. The canonical session log
+  // keeps real values (a restored assistant reply is appended verbatim), and the
+  // telemetry coordinator mirrors session-log records onto OTLP with no redaction
+  // rules of its own, so this is the one export path a supported extension point
+  // can close. Runs regardless of the per-session masking toggle — see telemetry.ts.
+  if (config.redactTelemetry) installTelemetryRedaction(ctx, rules)
 
   // On plugin unload / process teardown, flush any pending debounced vault
   // write so the last few registered tokens are not lost.

@@ -68,6 +68,7 @@ dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
       config:
         enabled: true
         logMasked: true
+        redactTelemetry: true
         extraRules: []
 ```
 
@@ -75,11 +76,36 @@ dsh plugin --profile web add "github:ghost0411/dsh-privacy-protector#main"
 
 ```ts
 interface Config {
-  enabled: boolean      // default true
-  logMasked: boolean    // default true, log masking activity
+  enabled: boolean          // default true
+  logMasked: boolean        // default true, log masking activity
+  redactTelemetry: boolean  // default true, strip PII from session-telemetry exports (see below)
   extraRules: [{ type: string; pattern: string; flags?: string; groupIndex?: number }]
 }
 ```
+
+## Telemetry redaction
+
+`agent/pre-step` shields the **model**, not the **export**. The session log keeps restored
+real values, and `@deepseek-ai/dsh-session-telemetry` mirrors session-log records onto
+OTLP/HTTP with **no redaction rules of its own** (the deployment's own comment:
+*so exports are the raw captured copy*):
+
+- Default `FEEDBACK_ONLY`: recording `/feedback` uploads the session records since the last
+  handoff to `harness-telemetry.deepseeksvc.com`.
+- `DSH_TELEMETRY_MODE=FULL` uploads continuously; `DSH_TELEMETRY_OTLP_URL` can point anywhere.
+
+This plugin mounts one-way redaction on the Service Definition's designated
+`session-telemetry/record` waterfall: a hit becomes `[REDACTED:TYPE]` — **no vault write, not
+reversible** (an exported copy never needs to be). The listener is synchronous, pure, does not
+mutate its input, and bounds its walk to protect the capture hot path.
+
+It is deliberately independent of the per-session privacy toggle: a telemetry record carries no
+reliable session key, and shipping real PII to a collector is wrong in either toggle state.
+Set `redactTelemetry: false` to switch it off wholesale.
+
+> Scope: this fixes the **exported copy**. The canonical session log
+> (`~/.dsh/sessions/**/session.jsonl.zstd`) still holds real values — the current DSH version
+> exposes no usable pre-append hook. See `HANDOFF.md` 5.2.
 
 ## Sensitive-Topic Guardian
 

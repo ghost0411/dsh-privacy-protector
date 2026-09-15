@@ -299,3 +299,64 @@ test('guardian lock: induced session refuses POST disarm with 403', async () => 
   // Verified through the real dispatcher; the harness ctx is retained for parity.
   assert.ok(ctx)
 })
+
+// ---------------------------------------------------------------------------
+// Regression: telemetry export carried raw PII. `@deepseek-ai/dsh-session-telemetry`
+// mirrors session-log records onto OTLP with no redaction rules of its own, and the
+// agent loop appends the *restored* assistant text to the log, so `/feedback`
+// (FEEDBACK_ONLY) uploaded real values. The plugin must mount a rule on the real
+// `session-telemetry/record` waterfall.
+// ---------------------------------------------------------------------------
+
+test('telemetry: the real cordis waterfall redacts one exported session-log record', async () => {
+  const { child, ctx } = await openPlugin()
+
+  // Shaped like the coordinator's mirrored `assistant/message` record.
+  const mirrored = {
+    channel: 'ledger',
+    time: 1757900000000,
+    severity: 'info',
+    attributes: { sessionId: 'sess-a', event: 'assistant/message' },
+    body: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '已记录：你的邮箱是 alice.zhang@example.com，电话 13800138000。' },
+        ],
+      },
+    },
+  }
+
+  const dispatched = child.ctx.waterfall('session-telemetry/record', mirrored, () => mirrored)
+  const out = dispatched instanceof Promise ? await dispatched : dispatched
+
+  assert.ok(!(dispatched instanceof Promise), 'the redaction rule must stay synchronous')
+  const serialized = JSON.stringify(out)
+  assert.ok(!serialized.includes('alice.zhang@example.com'), 'email must not leave the process')
+  assert.ok(!serialized.includes('13800138000'), 'phone must not leave the process')
+  assert.match(serialized, /\[REDACTED:EMAIL\]/)
+  assert.match(serialized, /\[REDACTED:PHONE_CN\]/)
+  // Non-PII context survives, so telemetry stays diagnosable.
+  assert.equal(out.attributes.sessionId, 'sess-a')
+  assert.equal(out.body.message.role, 'assistant')
+  // The canonical record handed in is never mutated.
+  assert.ok(JSON.stringify(mirrored).includes('alice.zhang@example.com'))
+
+  ctx.dispose?.()
+})
+
+test('telemetry: a PII-free exported record passes through the real waterfall', async () => {
+  const { child, ctx } = await openPlugin()
+  const clean = {
+    channel: 'ops',
+    time: 1,
+    severity: 'info',
+    attributes: { sessionId: 'sess-a' },
+    body: { event: 'turn/start', n: 3 },
+  }
+  const dispatched = child.ctx.waterfall('session-telemetry/record', clean, () => clean)
+  const out = dispatched instanceof Promise ? await dispatched : dispatched
+  assert.deepEqual(out, clean)
+  ctx.dispose?.()
+})
+

@@ -8,9 +8,18 @@ export interface AnonymizeResult {
   count: number
 }
 
-/** Replace every PII hit in `text` with a `[PII:TYPE:N]` placeholder. */
-export function anonymize(text: string, vault: Vault, rules: Rule[]): AnonymizeResult {
-  const hits: { start: number; end: number; type: string }[] = []
+export interface PiiHit {
+  start: number
+  end: number
+  type: string
+}
+
+/**
+ * Collect non-overlapping PII hits: earliest start wins, and a longer match beats
+ * a shorter one sharing the same start.
+ */
+export function collectHits(text: string, rules: Rule[]): PiiHit[] {
+  const hits: PiiHit[] = []
   for (const rule of rules) {
     const flags = rule.pattern.flags.includes('g') ? rule.pattern.flags : rule.pattern.flags + 'g'
     const regex = new RegExp(rule.pattern.source, flags.includes('d') ? flags : flags + 'd')
@@ -29,26 +38,52 @@ export function anonymize(text: string, vault: Vault, rules: Rule[]): AnonymizeR
   }
 
   hits.sort((a, b) => (a.start !== b.start ? a.start - b.start : b.end - a.end))
-  const selected: typeof hits = []
+  const selected: PiiHit[] = []
   let lastEnd = -1
   for (const hit of hits) {
     if (hit.start < lastEnd) continue
     selected.push(hit)
     lastEnd = hit.end
   }
-  if (selected.length === 0) return { text, count: 0 }
+  return selected
+}
 
+function spliceHits(text: string, hits: PiiHit[], replace: (hit: PiiHit) => string): string {
   let result = ''
   let cursor = 0
-  let count = 0
-  for (const hit of selected) {
+  for (const hit of hits) {
     result += text.slice(cursor, hit.start)
-    result += vault.register(hit.type, text.slice(hit.start, hit.end))
+    result += replace(hit)
     cursor = hit.end
-    count += 1
   }
-  result += text.slice(cursor)
-  return { text: result, count }
+  return result + text.slice(cursor)
+}
+
+/** Replace every PII hit in `text` with a `[PII:TYPE:N]` placeholder. */
+export function anonymize(text: string, vault: Vault, rules: Rule[]): AnonymizeResult {
+  const hits = collectHits(text, rules)
+  if (hits.length === 0) return { text, count: 0 }
+  return {
+    text: spliceHits(text, hits, (hit) => vault.register(hit.type, text.slice(hit.start, hit.end))),
+    count: hits.length,
+  }
+}
+
+export const REDACTED_RE = /\[REDACTED:[A-Z_]+\]/g
+
+/**
+ * One-way redaction for sinks that must never carry PII and can never be
+ * un-redacted: each hit becomes a `[REDACTED:TYPE]` marker.
+ *
+ * Unlike `anonymize` this never touches the vault, so it is safe to run on the
+ * synchronous telemetry capture path and the exported record carries no
+ * reversible mapping. Already-safe markers (`[PII:...]`, `[REDACTED:...]`) are
+ * not re-wrapped because no rule matches them.
+ */
+export function redactText(text: string, rules: Rule[]): string {
+  const hits = collectHits(text, rules)
+  if (hits.length === 0) return text
+  return spliceHits(text, hits, (hit) => `[REDACTED:${hit.type}]`)
 }
 
 /** Replace `[PII:TYPE:N]` tokens back with their original values. Non-string input passes through untouched. */

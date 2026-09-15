@@ -27,6 +27,7 @@ export interface ExtraRuleConfig {
 export interface Config {
     enabled: boolean;
     logMasked: boolean;
+    redactTelemetry: boolean;
     extraRules: ExtraRuleConfig[];
 }
 export declare const Config: Schema<Config>;

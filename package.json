@@ -1,6 +1,6 @@
 {
   "name": "dsh-privacy-protector",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Privacy protector for DeepSeek Harness: per-session toggle, syntactically pseudonymize PII before it reaches the model, restore after response.",
   "license": "Apache-2.0",
   "type": "module",
