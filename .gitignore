@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build caches
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Internal handoff docs
+HANDOFF.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

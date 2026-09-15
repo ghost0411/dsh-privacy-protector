@@ -1,0 +1,14 @@
+# Privacy protector patch layer for DeepSeek Harness profiles.
+# A top-level YAML array of loader patch entries.
+# Install as a bundle: `dsh plugin --profile web add link:/path/to/dsh-privacy-protector`
+- insert:
+    - id: dsh-privacy-protector
+      name: dsh-privacy-protector
+      inject:
+        - tools
+        - sessions
+        - webServer
+      config:
+        enabled: true
+        logMasked: true
+        extraRules: []
