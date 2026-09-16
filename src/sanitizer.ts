@@ -3,6 +3,17 @@ import type { Vault } from './vault.js'
 
 export const TOKEN_RE = /\[PII:([A-Z_]+):(\d+)\]/g
 
+/**
+ * A trailing fragment that can still GROW into a token once more text arrives.
+ *
+ * Streaming restorers must hold back a partial token that is split across
+ * chunk boundaries, but they must not hold back a literal `[` that can never
+ * become one: buffering on a bare `[` swallows ordinary prose (`使用 [ 符号`)
+ * and, worse, corrupts a JSON argument fragment (`{"note":"a [ b"}`), because
+ * the held tail is only flushed by a later chunk.
+ */
+export const PARTIAL_TOKEN_RE = /^\[(?:P(?:I(?:I(?::[A-Z_]*)?(?::[0-9]*)?)?)?)?$/
+
 export interface AnonymizeResult {
   text: string
   count: number
@@ -89,6 +100,64 @@ export function redactText(text: string, rules: Rule[]): string {
 /** Replace `[PII:TYPE:N]` tokens back with their original values. Non-string input passes through untouched. */
 export function restoreText(text: string, vault: Vault): string {
   return text.replace(TOKEN_RE, (token) => vault.lookup(token) ?? token)
+}
+
+/** Escape a value so it is safe to splice into an existing JSON string literal. */
+function escapeJsonString(value: string): string {
+  return JSON.stringify(value).slice(1, -1)
+}
+
+/**
+ * Restore tokens that sit inside JSON text — a streamed tool-call `arguments`
+ * fragment, or a fully assembled tool-call block.
+ *
+ * This differs from {@link restoreText} in one way that matters: the splice
+ * target is a JSON string literal, so the replacement must be JSON escaped. A
+ * stored value can contain `"` or `\` (the API_KEY rule can even capture a
+ * leading quote), and splicing such a value in raw produces invalid JSON, which
+ * would make the local tool call fail or run with truncated arguments.
+ *
+ * Tokens with no vault entry are left untouched: a placeholder is bad, but
+ * corrupt JSON is worse.
+ */
+export function restoreJsonText(text: string, vault: Vault): string {
+  return text.replace(TOKEN_RE, (token) => {
+    const value = vault.lookup(token)
+    return value === undefined ? token : escapeJsonString(value)
+  })
+}
+
+/**
+ * Count tokens inside a JSON-serializable structure that the vault COULD
+ * resolve, i.e. placeholders that should have been restored upstream but were
+ * not. Used as a read-only backstop on `tools/pre-execute`, which cannot
+ * rewrite the frozen arguments it observes.
+ */
+export function countRestorableTokens(value: unknown, vault: Vault, depth = 0): number {
+  if (depth > 32) return 0
+  if (typeof value === 'string') {
+    if (!value.includes('[PII:')) return 0
+    let count = 0
+    TOKEN_RE.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = TOKEN_RE.exec(value)) !== null) {
+      if (vault.lookup(match[0]) !== undefined) count += 1
+    }
+    return count
+  }
+  if (Array.isArray(value)) {
+    let count = 0
+    for (const item of value) count += countRestorableTokens(item, vault, depth + 1)
+    return count
+  }
+  if (value !== null && typeof value === 'object') {
+    let count = 0
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      count += countRestorableTokens(item, vault, depth + 1)
+    }
+    return count
+  }
+  return 0
 }
 
 /** Deep-scrub a JSON-serializable structure in place. */

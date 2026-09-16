@@ -38,14 +38,24 @@ dsh-privacy-protector/
 | `experimental.chat.messages.transform` | `agent/pre-step` (waterfall) | pre-send masking + guardian topic masking |
 | `experimental.chat.system.transform` | inside `agent/pre-step` | system prompt masking |
 | `experimental.text.complete` | `llm/stream` (waterfall) | restore streaming text after the model replies |
-| `tool.execute.before` | `tools/pre-execute` (waterfall) | restore original values for local tool arguments |
+| `tool.execute.before` | `tool-call-delta` on `llm/stream` | restore original values for local tool arguments (**not** `tools/pre-execute`, see below) |
+
+> **Why tool-argument restoration is not on `tools/pre-execute`**: by the time that event fires,
+> `exec.arguments` has already been **deep-frozen** by the tool registry, and `PreToolDecision` is
+> only `allow`/`deny`/`ask` — a rewrite is not expressible in the type. Upstream documents this as
+> deliberate, because logged and presented arguments would then desync from what actually runs.
+> Restoration therefore happens on the streamed `tool-call-delta.argumentsDelta`: the last writable
+> point before those fragments are assembled into the final tool-call block (which is then frozen
+> and executed). `tools/pre-execute` is still observed, but **read-only** — it only warns when a
+> placeholder reached a tool un-restored.
 
 ## Build & Test
 
 ```bash
 npm install
-npm run build          # tsc -> lib/ + client bundle
-npm test               # node --test (87 tests, all passing)
+npm run build            # contract type-check first, then tsc -> lib/ + client bundle
+npm run test:contract    # compile-time contract against the real DSH types
+npm test                 # node --test (inside the DSH sandbox run each file directly)
 ```
 
 ## Install into DSH Desktop
@@ -79,6 +89,7 @@ interface Config {
   enabled: boolean          // default true
   logMasked: boolean        // default true, log masking activity
   redactTelemetry: boolean  // default true, strip PII from session-telemetry exports (see below)
+  warnUnsafeSinks: boolean  // default true, probe for dangerous log-export sinks on first model request
   extraRules: [{ type: string; pattern: string; flags?: string; groupIndex?: number }]
 }
 ```
@@ -129,9 +140,16 @@ Chat assistants often use leading questions to coax users into revealing private
 
 ## Key Design
 
-### 1. Vault — in-memory mapping table
+### 1. Vault — token↔original mapping table
 
-Mappings are not persisted across sessions, which prevents file-leak risk. A fresh vault is created whenever a plugin instance is created.
+ONE GLOBAL INSTANCE per process, shared by every session (created once in `apply()`). Tokens are
+numbered per TYPE only (`[PII:EMAIL:0]`), **not** per session — session isolation lives in the
+*toggle*, not here.
+
+Since v0.3.0 it **does survive a restart**: the mapping is encrypted with Electron `safeStorage`
+(DPAPI on Windows) before being written to
+`$DSH_HOME/storages/dsh-privacy-protector/vault.json`. Without safeStorage it degrades to
+memory-only — PII is never written in cleartext.
 
 ### 2. The 9 interception rules
 
@@ -158,22 +176,46 @@ Mappings are not persisted across sessions, which prevents file-leak risk. A fre
 
 - Pre-send: `agent/pre-step` rewrites messages to placeholders → the model only processes sanitized content
 - Post-answer: `llm/stream` wraps the stream and restores each chunk to the original → the user sees real values
-- Local tools: `tools/pre-execute` restores placeholders to raw arguments before execution
+- Local tools: the same `llm/stream` hook restores values inside `tool-call-delta.argumentsDelta`, so a
+  tool receives the **original** value (restored values are JSON-escaped, so a value containing `"`
+  cannot corrupt the argument JSON)
 
 ### 5. Sensitive-topic guardian
 
 - Complements format rules: format rules catch "shaped PII", the guardian catches "free-text sensitive self-reports"
 - Masking is not written back (no vault registration), so the model cannot recover the original through placeholder context
 - Counters are persisted per session; they survive restarts and the UI shows per-category totals
+- **Inducement detection reads session history**: `agent/pre-step`'s `payload.messages` is only the
+  claimed USER batch for the current turn and structurally never contains an assistant message, so the
+  assistant side comes from `payload.agent.session.deriveMessages()`
 
 ### 6. Security boundary notes
 
 - **Not protected**: obfuscated variants (e.g. `alice [at] qq`), names/addresses/organizations, unstructured secrets
-- **Password rule limits**: only fires when a keyword is adjacent; arbitrary digit strings cannot be caught
+- **Password rule limits**: only fires when a keyword is adjacent; arbitrary digit strings cannot be
+  caught, and a quoted value (`password = "s3cret"`) is **not** captured — all three implementations
+  agree, so this is a known gap rather than a divergence
 - **Guardian false positives/negatives**: the semantic rules are a conservative approximation; complex phrasing may slip through, and neutral questions should not be flagged
-- **Mapping table risk**: vault lives in memory; a process crash loses it
-- **Model side**: placeholders themselves might be inferred by the model (mitigate with prompt constraints)
+- **The canonical session log contains real PII, and the current DSH version cannot fix it**: DSH writes
+  the **restored originals** into the durable session log
+  (`~/.dsh/sessions/<workspace>/session.jsonl.zstd`, zstd-compressed but **never encrypted**). There is
+  no pre-append hook (verified: `session/event` is post-commit, `session-telemetry/record` only affects
+  the exported copy, `tools/ptc-dispatch-log` only covers `run_code` sub-dispatches). Any plugin that
+  reads session content still sees the originals — in this profile, `dsh-cost-meter`,
+  `@openviking/dsh-memory-plugin` (which persist into a memory store) and `dsh-context`.
+- **Keep `dsh-session-log-deepseek` disabled**: with `enabled: true` it uploads the **raw session log**
+  to the DeepSeek API as the `dsh_session_log` request field, and there is no redaction hook to mount.
+  It defaults to `enabled: false`. This plugin probes for it on this session's first model request and
+  logs a **DANGER** line when it is active (silence it with `warnUnsafeSinks: false`) — **a warning is
+  not a fix**.
+- **Telemetry export** is redacted (`session-telemetry/record`, one-way `[REDACTED:TYPE]`).
 
 ## Upstream API Compatibility Note
 
-DSH is in developer preview (`SESSION_FORMAT_VERSION = 0`); event signatures may change. The event shapes this plugin assumes (`agent/pre-step`'s `{kind:'enter', messages}`, `llm/stream`'s StreamChunk, `tools/pre-execute`'s `{name, args}`) should be checked against the pinned upstream version's generated docs before installing. Loader robustness tests cover abnormal input; failing hook logic never blocks a session.
+DSH is in developer preview (`SESSION_FORMAT_VERSION = 0`); event signatures may change.
+**This plugin no longer hand-writes event shapes**: the declarations for `agent/pre-step`,
+`llm/stream` and `tools/pre-execute` come from upstream packages themselves
+(`@deepseek-ai/dsh-agent` / `dsh-llm` / `dsh-tools`, imported as devDependencies), and
+`tsconfig.contract.json` + `test/types/dsh-contract.ts` make an upstream field rename a **build
+failure** instead of a silent no-op. `test/contract.test.mjs` re-checks the real `.d.ts` at run time.
+Loader robustness tests cover abnormal input; failing hook logic never blocks a session.

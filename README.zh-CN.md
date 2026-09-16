@@ -40,14 +40,22 @@ dsh-privacy-protector/
 | `experimental.chat.messages.transform` | `agent/pre-step` (waterfall) | 发送前脱敏 + 守护话题遮挡 |
 | `experimental.chat.system.transform` | `agent/pre-step` 内处理 | system prompt 脱敏 |
 | `experimental.text.complete` | `llm/stream` (waterfall) | 模型回答后还原 streaming text |
-| `tool.execute.before` | `tools/pre-execute` (waterfall) | 本地工具参数还原 |
+| `tool.execute.before` | `llm/stream` 的 `tool-call-delta` | 本地工具参数还原（**不是** `tools/pre-execute`，见下） |
+
+> **为什么工具参数还原不在 `tools/pre-execute`**：该事件的 `exec.arguments` 已被工具注册表
+> **深度冻结**，且 `PreToolDecision` 只有 `allow`/`deny`/`ask`——**类型层面表达不出「改写入参」**，
+> 上游文档也明确写着这是有意的设计（否则日志/呈现的参数会与实际执行脱钩）。
+> 所以还原挂在 `llm/stream` 的流式 `tool-call-delta.argumentsDelta` 上：那是被拼接成
+> 最终 tool-call block（随后冻结、执行）**之前最后一个可写点**。
+> `tools/pre-execute` 仍被监听，但**只读**——它只负责在发现「占位符没被还原就到达了工具」时打警告。
 
 ## 构建与测试
 
 ```bash
 npm install
-npm run build          # tsc -> lib/ + client bundle
-npm test               # node --test（87 项全过）
+npm run build            # 先跑契约类型检查，再 tsc -> lib/ + client bundle
+npm run test:contract    # 与真实 DSH 类型的编译期契约（字段名写错即失败）
+npm test                 # node --test（沙箱内改用逐个 node test\<name>.test.mjs）
 ```
 
 ## 安装到 DSH Desktop
@@ -81,6 +89,7 @@ interface Config {
   enabled: boolean          // 默认 true
   logMasked: boolean        // 默认 true，记录脱敏日志
   redactTelemetry: boolean  // 默认 true，从会话遥测导出中抹掉 PII（见下）
+  warnUnsafeSinks: boolean  // 默认 true，首次发模型请求时探测并警告危险的日志导出 sink
   extraRules: [{ type: string; pattern: string; flags?: string; groupIndex?: number }]
 }
 ```
@@ -133,9 +142,14 @@ interface Config {
 
 ## 关键设计
 
-### 1. Vault — 内存映射表
+### 1. Vault — token↔原文映射表
 
-跨会话不保留映射，防止文件泄露风险。每次插件实例创建时新建 vault。
+**进程内全局单例**，所有会话共用（`apply()` 里创建一次），token 只按类型编号
+（`[PII:EMAIL:0]`），**不按会话隔离**——会话隔离体现在*开关*上，不在 vault 上。
+
+v0.3.0 起**会跨重启恢复**：映射表经 Electron `safeStorage`（Windows 即 DPAPI）加密后写入
+`$DSH_HOME/storages/dsh-privacy-protector/vault.json`。拿不到 safeStorage 时降级为纯内存，
+**绝不写明文 PII**。
 
 ### 2. 9 条拦截规则
 
@@ -162,25 +176,40 @@ interface Config {
 
 - 发送前：`agent/pre-step` 把消息改为占位符 → 模型只处理脱敏内容
 - 回答后：`llm/stream` 包装流，逐 chunk 还原为原文 → 用户看到真实值
-- 本地工具：`tools/pre-execute` 把占位符还原为原始参数再执行
+- 本地工具：同一个 `llm/stream` 钩子在 `tool-call-delta.argumentsDelta` 上还原参数，
+  所以工具拿到的是**原文**（还原值会做 JSON 转义，避免值里含 `"` 时把参数 JSON 弄坏）
 
 ### 5. 敏感话题守护（guardian）
 
 - 与格式规则互补：格式规则抓「形态化 PII」，守护抓「自由文本敏感自报」
 - 遮挡不回写（不注册 vault），杜绝模型通过占位符上下文还原
 - 计数按会话持久化，重启不丢失；可在 UI 看到每个话题类别的拦截量
+- **诱导检测读的是会话历史**：`agent/pre-step` 的 `payload.messages` 只是本回合
+  「被 claim 的用户批次」，**结构上不含 assistant 消息**，所以 assistant 侧必须取自
+  `payload.agent.session.deriveMessages()`
 
 ### 6. 安全边界提示
 
 - **不保护**：变形写法（如 `alice [at] qq`）、姓名/地址/组织名、非结构化机密
-- **密码规则限制**：只在关键词紧邻时触发，无法拦截任意数字串
+- **密码规则限制**：只在关键词紧邻时触发，无法拦截任意数字串；带引号的密码值
+  （`password = "s3cret"`）**不会**被捕获——三套实现一致，属已知缺口
 - **守护误报/漏报**：语义规则是保守近似，复杂表述可能漏判，中性提问不应误伤
-- **映射表风险**：vault 存内存，进程崩溃则丢失
-- **模型侧**：占位符本身可能被模型推测还原（需配合 prompt 约束）
+- **会话日志本体含真实 PII（当前 DSH 版本无法修）**：DSH 把**还原后的原文**写进权威会话日志
+  （`~/.dsh/sessions/<workspace>/session.jsonl.zstd`，仅 zstd 压缩、**未加密**）。已核实没有
+  append 前的可写 hook（`session/event` 是 post-commit；`session-telemetry/record` 只改导出副本；
+  `tools/ptc-dispatch-log` 只管 `run_code` 子分发）。因此**直接读会话内容的下游**仍会拿到原文，
+  例如 `dsh-cost-meter`、`@openviking/dsh-memory-plugin`（会写进记忆库）、`dsh-context`。
+- **`dsh-session-log-deepseek` 必须保持关闭**：`enabled: true` 时它会把**权威会话日志原文**
+  作为 `dsh_session_log` 请求字段上传到 DeepSeek API，且没有任何脱敏 hook 可挂。它默认
+  `enabled: false`。本插件会在本会话首次发起模型请求时探测它，命中就打印一条 **DANGER** 日志
+  （可用 `warnUnsafeSinks: false` 关闭该提示）——**提示不等于修复**。
+- **遥测导出**已脱敏（`session-telemetry/record`，单向 `[REDACTED:TYPE]`）。
 
 ## 与上游 API 的兼容性注意
 
-DSH 处于开发者预览期（SESSION_FORMAT_VERSION = 0），事件签名可能变化。本插件
-假设的事件形状（`agent/pre-step` 的 `{kind:'enter', messages}`、`llm/stream` 的
-StreamChunk、`tools/pre-execute` 的 `{name,args}`）在安装前应对比所固定上游版本的
-生成文档确认。加载器鲁棒性测试已覆盖异常输入，钩子逻辑失败不会阻断会话。
+DSH 处于开发者预览期（SESSION_FORMAT_VERSION = 0），事件签名可能变化。**本插件不再手写事件形状**：
+`agent/pre-step` / `llm/stream` / `tools/pre-execute` 的声明来自上游包本身
+（`@deepseek-ai/dsh-agent` / `dsh-llm` / `dsh-tools`，作为 devDependency 引入），
+`tsconfig.contract.json` + `test/types/dsh-contract.ts` 会在上游改字段时**直接编译失败**。
+`test/contract.test.mjs` 另在运行期核对真实 `.d.ts`。加载器鲁棒性测试覆盖异常输入，
+钩子逻辑失败不会阻断会话。

@@ -1,6 +1,6 @@
 {
   "name": "dsh-privacy-protector",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Privacy protector for DeepSeek Harness: per-session toggle, syntactically pseudonymize PII before it reaches the model, restore after response.",
   "license": "Apache-2.0",
   "type": "module",
@@ -16,7 +16,8 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
+    "build": "npm run test:contract && tsc -p tsconfig.json && node scripts/build-client.mjs",
+    "test:contract": "tsc -p tsconfig.contract.json",
     "test": "node --test test/*.test.mjs"
   },
   "dsh": {
@@ -35,6 +36,9 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@types/node": "^26.5.1",
     "typescript": "^5"

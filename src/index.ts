@@ -8,7 +8,13 @@ import { createGuardian } from './guardian.js'
 import { createPrivacyCtlHandler, type HttpLikeRequest, type HttpLikeResponse } from './privacyCtl.js'
 import { createToggleFileStore, createVaultFileStore, dataDir, detectSafeStorage } from './store.js'
 import { installTelemetryRedaction } from './telemetry.js'
+import { probeSessionLogUpload } from './dshSafety.js'
 
+// `webServer` is declared here because the plugin may be loaded without the
+// host webserver package present. `tools` and `sessions` are NOT redeclared:
+// their real service types come from `@deepseek-ai/dsh-tools` /
+// `@deepseek-ai/dsh-session`, and a locally invented shape would be a second
+// source of truth for the same service.
 declare module '@deepseek-ai/cordis' {
   interface Context {
     webServer: {
@@ -18,10 +24,6 @@ declare module '@deepseek-ai/cordis' {
         handler: (req: HttpLikeRequest, res: HttpLikeResponse) => void | Promise<void>
       }): () => void
     }
-    sessions: {
-      get(id: string): unknown
-    }
-    tools: unknown
   }
 }
 
@@ -42,6 +44,8 @@ export interface Config {
   enabled: boolean
   logMasked: boolean
   redactTelemetry: boolean
+  /** Warn (once per process) when a plugin would export the raw session log. */
+  warnUnsafeSinks: boolean
   extraRules: ExtraRuleConfig[]
 }
 
@@ -49,6 +53,7 @@ export const Config: Schema<Config> = Schema.object({
   enabled: Schema.boolean().default(true),
   logMasked: Schema.boolean().default(true),
   redactTelemetry: Schema.boolean().default(true),
+  warnUnsafeSinks: Schema.boolean().default(true),
   extraRules: Schema.array(
     Schema.object({
       type: Schema.string(),
@@ -106,15 +111,32 @@ export function apply(ctx: Context, config: Config) {
   ]
   // Per-session + global toggle registry: every session starts OFF, global starts OFF.
 
-  registerHooks(ctx, vault, rules, (sessionId) => toggles.isEnabled(sessionId), (message) => {
-    if (!config.logMasked) return
+  /** Single logging path; must never break the conversation. */
+  const notify = (message: string) => {
     try {
       if (typeof ctx.logger === 'function') ctx.logger('privacy-protector')?.info?.(message)
       else console.log('[privacy-protector]', message)
     } catch {
       // logging must never break the conversation
     }
-  }, guardian)
+  }
+
+  registerHooks(ctx, vault, rules, (sessionId) => toggles.isEnabled(sessionId), (message) => {
+    if (config.logMasked) notify(message)
+  }, guardian, () => {
+    // The canonical session log holds the REAL values this plugin restored, and
+    // no supported hook can rewrite it. Some sinks can still be called out — see
+    // src/dshSafety.ts and the README "Known exposure" section.
+    if (!config.warnUnsafeSinks) return
+    const probe = probeSessionLogUpload(ctx)
+    if (probe.state === 'registered') {
+      notify(
+        `DANGER: ${probe.note}. ` +
+          'The session log contains unredacted PII and has no redaction hook. ' +
+          'Disable dsh-session-log-deepseek (its `enabled` config) or stop using this plugin with it.',
+      )
+    }
+  })
 
   // Redact PII in outbound session-telemetry records. The canonical session log
   // keeps real values (a restored assistant reply is appended verbatim), and the
@@ -171,4 +193,6 @@ export type { Guardian, GuardianSnapshot } from './guardian.js'
 export type { ToggleRegistry } from './toggle.js'
 export type { HttpLikeRequest, HttpLikeResponse, PrivacyCtlDeps } from './privacyCtl.js'
 export { createToggleFileStore, createVaultFileStore, dataDir, detectSafeStorage } from './store.js'
+export { probeSessionLogUpload, DSH_SESSION_LOG_FIELD } from './dshSafety.js'
+export type { SessionLogUploadProbe, SessionLogUploadState } from './dshSafety.js'
 export type { ToggleFileStore, VaultFileStore, Encryptor } from './store.js'

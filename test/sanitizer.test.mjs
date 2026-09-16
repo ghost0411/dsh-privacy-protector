@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createVault } from '../lib/vault.js'
 import { compileRules } from '../lib/rules.js'
-import { anonymize, restoreText } from '../lib/sanitizer.js'
+import { anonymize, restoreText, restoreJsonText, countRestorableTokens, PARTIAL_TOKEN_RE } from '../lib/sanitizer.js'
 
 const RULES = compileRules()
 
@@ -68,4 +68,56 @@ test('restoreText passes non-token text through untouched', () => {
   const vault = createVault()
   assert.equal(restoreText('hello world', vault), 'hello world')
   assert.equal(restoreText('[PII:UNKNOWN:99]', vault), '[PII:UNKNOWN:99]')
+})
+
+// ---------------------------------------------------------------------------
+// JSON-embedded restoration (streamed tool-call arguments)
+// ---------------------------------------------------------------------------
+
+test('restoreJsonText keeps the JSON valid when a value contains a quote', () => {
+  const vault = createVault()
+  const token = vault.register('API_KEY', 'api_key="s3cret')
+  const out = restoreJsonText(`{"k":"${token}"}`, vault)
+  assert.equal(JSON.parse(out).k, 'api_key="s3cret')
+  // A naive splice would have produced {"k":"api_key="s3cret"} — invalid JSON.
+  assert.notEqual(out, `{"k":"${vault.lookup(token)}"}`)
+})
+
+test('restoreJsonText escapes backslashes and newlines too', () => {
+  const vault = createVault()
+  const token = vault.register('PASSWORD', 'a\\b\nc')
+  const out = restoreJsonText(`{"p":"${token}"}`, vault)
+  assert.equal(JSON.parse(out).p, 'a\\b\nc')
+})
+
+test('restoreJsonText leaves unresolvable tokens alone', () => {
+  const vault = createVault()
+  assert.equal(restoreJsonText('{"k":"[PII:EMAIL:7]"}', vault), '{"k":"[PII:EMAIL:7]"}')
+})
+
+test('PARTIAL_TOKEN_RE matches only plausible token prefixes', () => {
+  for (const ok of ['[', '[P', '[PI', '[PII', '[PII:', '[PII:EMAIL', '[PII:EMAIL:', '[PII:EMAIL:0']) {
+    assert.ok(PARTIAL_TOKEN_RE.test(ok), `expected partial: ${ok}`)
+  }
+  for (const no of ['[PII:EMAIL:0]', '[abc', '["a', '[lower:1]', '[PII:EMAIL:0] x', 'x[']) {
+    assert.ok(!PARTIAL_TOKEN_RE.test(no), `expected NOT partial: ${no}`)
+  }
+})
+
+test('countRestorableTokens counts only vault-resolvable placeholders, deeply', () => {
+  const vault = createVault()
+  const token = vault.register('EMAIL', 'a@b.com')
+  assert.equal(countRestorableTokens({ a: token, b: [token, 'plain'] }, vault), 2)
+  assert.equal(countRestorableTokens('[PII:EMAIL:404]', vault), 0, 'unknown token is not a restore miss')
+  assert.equal(countRestorableTokens(42, vault), 0)
+  assert.equal(countRestorableTokens(null, vault), 0)
+})
+
+test('countRestorableTokens is safe on cyclic structures', () => {
+  const vault = createVault()
+  const token = vault.register('EMAIL', 'a@b.com')
+  const cyclic = { token }
+  cyclic.self = cyclic
+  // Depth-limited: must terminate rather than blow the stack.
+  assert.ok(countRestorableTokens(cyclic, vault) >= 1)
 })

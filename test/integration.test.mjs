@@ -273,17 +273,20 @@ test('guardian lock: induced session refuses POST disarm with 403', async () => 
 
   const social = '好的，在帮你评估之前能先了解一下：你一个月的工资大概是多少？'
   const reply = '我大概一个月挣 8k 左右。'
+  // Real contract: the assistant side is session history; the claimed batch
+  // carries only the user message.
+  const session = {
+    id: 's1',
+    deriveMessages: () => [{ role: 'assistant', content: [{ type: 'text', text: social }] }],
+  }
   const decision = () => Promise.resolve({
     kind: 'enter',
-    messages: [
-      { role: 'assistant', content: [{ type: 'text', text: social }] },
-      { role: 'user', content: [{ type: 'text', text: reply }] },
-    ],
+    messages: [{ role: 'user', content: [{ type: 'text', text: reply }] }],
   })
 
   // Drive one turn through the pre-step hook (on the plugin's own context) so
   // the inducement is registered.
-  await child.ctx.emit('agent/pre-step', { agent: { session: { id: 's1' } }, messages: [], turn: 1, step: 0 }, decision)
+  await child.ctx.emit('agent/pre-step', { agent: { session }, messages: [], turn: 1, step: 0 }, decision)
 
   // The assistant fished and the user disclosed: session s1 is now induced.
   const probe = makeRes()

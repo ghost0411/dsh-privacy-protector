@@ -10,10 +10,6 @@ declare module '@deepseek-ai/cordis' {
                 handler: (req: HttpLikeRequest, res: HttpLikeResponse) => void | Promise<void>;
             }): () => void;
         };
-        sessions: {
-            get(id: string): unknown;
-        };
-        tools: unknown;
     }
 }
 export declare const name = "dsh-privacy-protector";
@@ -28,6 +24,8 @@ export interface Config {
     enabled: boolean;
     logMasked: boolean;
     redactTelemetry: boolean;
+    /** Warn (once per process) when a plugin would export the raw session log. */
+    warnUnsafeSinks: boolean;
     extraRules: ExtraRuleConfig[];
 }
 export declare const Config: Schema<Config>;
@@ -41,4 +39,6 @@ export type { Guardian, GuardianSnapshot } from './guardian.js';
 export type { ToggleRegistry } from './toggle.js';
 export type { HttpLikeRequest, HttpLikeResponse, PrivacyCtlDeps } from './privacyCtl.js';
 export { createToggleFileStore, createVaultFileStore, dataDir, detectSafeStorage } from './store.js';
+export { probeSessionLogUpload, DSH_SESSION_LOG_FIELD } from './dshSafety.js';
+export type { SessionLogUploadProbe, SessionLogUploadState } from './dshSafety.js';
 export type { ToggleFileStore, VaultFileStore, Encryptor } from './store.js';
